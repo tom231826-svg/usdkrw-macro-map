@@ -1,0 +1,66 @@
+name: Update market data
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub schedules use UTC and are best-effort, not exact timers.
+    # Twice on weekdays: after the U.S. data day settles and again during Korea morning.
+    - cron: "17 0,12 * * 1-5"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update-market-data
+  cancel-in-progress: false
+
+jobs:
+  update-data:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fetch latest data snapshot
+        run: node scripts/fetch-data.mjs
+
+      - name: Commit updated snapshot
+        run: |
+          if git diff --quiet -- data/snapshot.js; then
+            echo "No data changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/snapshot.js
+          git commit -m "Update USD/KRW data snapshot"
+          git push
+
+      - name: Prepare static site
+        run: |
+          mkdir -p dist/data
+          cp index.html app.js styles.css dist/
+          cp data/snapshot.js dist/data/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
