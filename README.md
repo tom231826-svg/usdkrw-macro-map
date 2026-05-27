@@ -10,7 +10,7 @@
 - 환율 상승/하락 압력 지도
 - 과거 USD/KRW 롤링 백테스트로 보정한 forecast cone
 - 장기 원화 위치 밴드
-- FRED와 World Bank 데이터 스냅샷
+- 네이버 금융 하나은행 고시환율, FRED, World Bank 데이터 스냅샷
 - GitHub Actions 기반 하루 두 번 데이터 갱신
 
 ## Local usage

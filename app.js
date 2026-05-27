@@ -51,6 +51,35 @@ const worldBank = Object.fromEntries(
   Object.entries(snapshot?.worldBank ?? {}).map(([key, rows]) => [key, toPoints(rows)]),
 );
 
+const market = snapshot?.market ?? {};
+const usdKrw = mergeCurrentUsdKrwSpot(fred.DEXKOUS ?? []);
+
+function marketUsdKrwSpotPoint() {
+  const spot = market.usdkrwSpot;
+  if (!spot || !Number.isFinite(Number(spot.value))) return null;
+  return {
+    date: new Date(spot.observedAt ?? `${spot.date}T00:00:00+09:00`),
+    label: spot.localTime ?? spot.date,
+    value: Number(spot.value),
+    source: spot.source,
+    sourceDetail: spot.sourceDetail,
+    round: spot.round,
+  };
+}
+
+function mergeCurrentUsdKrwSpot(series) {
+  const spot = marketUsdKrwSpotPoint();
+  if (!spot) return series;
+
+  const spotDate = spot.label.slice(0, 10).replaceAll(".", "-");
+  const merged = series.filter((point) => point.label !== spotDate);
+  const latestPoint = latest(merged);
+  if (!latestPoint || spot.date > latestPoint.date) {
+    merged.push(spot);
+  }
+  return merged.sort((a, b) => a.date - b.date);
+}
+
 function latest(series) {
   return series?.[series.length - 1] ?? null;
 }
@@ -129,7 +158,7 @@ function classifyRegime(date) {
   const dxy = changePct(fred.DTWEXBGS, 60, date);
   const vix = changePct(fred.VIXCLS, 20, date);
   const vixLevel = atOrBefore(fred.VIXCLS, date)?.value;
-  const usdk = changePct(fred.DEXKOUS, 60, date);
+  const usdk = changePct(usdKrw, 60, date);
 
   if ((vix ?? 0) > 18 || (vixLevel ?? 0) > 26) return "risk";
   if ((dxy ?? 0) > 1.2) return "dollar";
@@ -165,7 +194,7 @@ function svgPath(points, x, y) {
 
 function renderChart(rangeKey = "3m") {
   const svg = document.querySelector("#fx-chart");
-  const allFx = fred.DEXKOUS ?? [];
+  const allFx = usdKrw;
   if (!svg || !allFx.length) return;
 
   const latestFx = latest(allFx);
@@ -586,7 +615,7 @@ function calibrateForecastCone(fx, horizons) {
 }
 
 function buildForecast(up, down) {
-  const fx = fred.DEXKOUS ?? [];
+  const fx = usdKrw;
   const currentPoint = latest(fx);
   if (!currentPoint) return null;
 
@@ -767,7 +796,7 @@ function renderSummary(up, down) {
 }
 
 function longPositionText() {
-  const fx = fred.DEXKOUS ?? [];
+  const fx = usdKrw;
   const current = latest(fx)?.value;
   const history = fx
     .filter((point) => point.date >= new Date("1995-01-01T00:00:00"))
@@ -805,7 +834,7 @@ function longPositionText() {
 }
 
 function renderLongLens() {
-  const fx = fred.DEXKOUS ?? [];
+  const fx = usdKrw;
   const current = latest(fx)?.value;
   const history = fx
     .filter((point) => point.date >= new Date("1995-01-01T00:00:00"))
@@ -951,9 +980,10 @@ function init() {
   }
 
   const generated = new Date(snapshot.generatedAt);
-  const latestFx = latest(fred.DEXKOUS);
-  document.querySelector(".snapshot span").textContent = latestFx
-    ? "연준 H.10 최신 관측"
+  const latestFx = latest(usdKrw);
+  const spot = market.usdkrwSpot;
+  document.querySelector(".snapshot span").textContent = spot
+    ? `${spot.sourceDetail ?? "하나은행"} 현재 고시`
     : "데이터 생성";
   document.querySelector("#snapshot-date").textContent = latestFx
     ? latestFx.label.replaceAll("-", ".")

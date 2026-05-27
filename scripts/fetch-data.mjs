@@ -85,6 +85,16 @@ const requestHeaders = {
   "User-Agent": "usdkrw-macro-map/0.1 (+local-prototype)",
 };
 
+function parseKoreaLocalDateTime(text) {
+  const match = text.match(/(\d{4})\.(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute] = match;
+  return {
+    date: `${year}-${month}-${day}`,
+    observedAt: new Date(`${year}-${month}-${day}T${hour}:${minute}:00+09:00`).toISOString(),
+  };
+}
+
 function parseFredCsv(csv, id) {
   const lines = csv.trim().split(/\r?\n/);
   const [, valueHeader] = lines[0].split(",");
@@ -132,6 +142,43 @@ async function fetchWorldBankIndicator(indicator) {
     .sort((a, b) => Number(a[0]) - Number(b[0]));
 }
 
+async function fetchNaverUsdKrwSpot() {
+  const url =
+    "https://finance.naver.com/marketindex/exchangeDetail.naver?marketindexCd=FX_USDKRW";
+  const response = await fetch(url, { headers: requestHeaders });
+  if (!response.ok) {
+    throw new Error(`Naver USD/KRW spot failed: ${response.status}`);
+  }
+
+  const html = new TextDecoder("euc-kr").decode(await response.arrayBuffer());
+  const value = Number(
+    html
+      .match(
+        /<option value="([0-9.]+)" label="1"\s+class="selectbox-default"\s+selected="selected">\s*미국 달러 USD/,
+      )?.[1]
+      ?.replaceAll(",", ""),
+  );
+  const localTime = html.match(/<span class="date">([^<]+)/)?.[1]?.trim();
+  const standard = html.match(/<span class="standard">([^<]+)/)?.[1]?.trim();
+  const round = Number(html.match(/<span class="round">고시회차 <em>(\d+)<\/em>회/)?.[1]);
+  const parsedDate = localTime ? parseKoreaLocalDateTime(localTime) : null;
+
+  if (!Number.isFinite(value) || !parsedDate) {
+    throw new Error("Could not parse Naver USD/KRW spot quote");
+  }
+
+  return {
+    value,
+    date: parsedDate.date,
+    observedAt: parsedDate.observedAt,
+    localTime,
+    source: "Naver Finance",
+    sourceDetail: standard || "Hana Bank",
+    round: Number.isFinite(round) ? round : null,
+    url,
+  };
+}
+
 async function readExistingSnapshot(filePath) {
   try {
     const contents = await readFile(filePath, "utf8");
@@ -145,6 +192,7 @@ async function readExistingSnapshot(filePath) {
 function comparableSnapshot(snapshot) {
   return JSON.stringify({
     fred: snapshot.fred,
+    market: snapshot.market,
     worldBank: snapshot.worldBank,
     metadata: snapshot.metadata,
   });
@@ -176,15 +224,28 @@ async function main() {
     };
   }
 
+  process.stdout.write("Fetching Naver USD/KRW spot...\n");
+  const market = {
+    usdkrwSpot: await fetchNaverUsdKrwSpot(),
+  };
+
   const snapshot = {
     generatedAt: new Date().toISOString(),
     fred,
+    market,
     worldBank,
     metadata: {
       fred: metadata,
+      market: {
+        usdkrwSpot: {
+          label: "USD/KRW spot reference rate",
+          source: `${market.usdkrwSpot.source} (${market.usdkrwSpot.sourceDetail})`,
+          url: market.usdkrwSpot.url,
+        },
+      },
       worldBank: worldBankMetadata,
       notes: [
-        "This prototype uses market and annual macro data that can be fetched without API keys.",
+        "This prototype uses a current Korean bank reference rate plus market and annual macro data that can be fetched without API keys.",
         "Korean monthly trade, semiconductor exports, foreign investor flows, and BOK ECOS series are reserved as next connectors.",
       ],
     },
