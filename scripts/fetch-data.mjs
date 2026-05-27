@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -132,6 +132,24 @@ async function fetchWorldBankIndicator(indicator) {
     .sort((a, b) => Number(a[0]) - Number(b[0]));
 }
 
+async function readExistingSnapshot(filePath) {
+  try {
+    const contents = await readFile(filePath, "utf8");
+    const match = contents.match(/^window\.USDKRW_SNAPSHOT = (.*);\n?$/s);
+    return match ? JSON.parse(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function comparableSnapshot(snapshot) {
+  return JSON.stringify({
+    fred: snapshot.fred,
+    worldBank: snapshot.worldBank,
+    metadata: snapshot.metadata,
+  });
+}
+
 async function main() {
   const fred = {};
   const metadata = {};
@@ -172,9 +190,16 @@ async function main() {
     },
   };
 
+  const snapshotPath = resolve(root, "data", "snapshot.js");
+  const existing = await readExistingSnapshot(snapshotPath);
+  if (existing && comparableSnapshot(existing) === comparableSnapshot(snapshot)) {
+    process.stdout.write("No data changes. Keeping existing data/snapshot.js\n");
+    return;
+  }
+
   await mkdir(resolve(root, "data"), { recursive: true });
   await writeFile(
-    resolve(root, "data", "snapshot.js"),
+    snapshotPath,
     `window.USDKRW_SNAPSHOT = ${JSON.stringify(snapshot)};\n`,
     "utf8",
   );
