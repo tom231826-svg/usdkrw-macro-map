@@ -953,7 +953,7 @@ function init() {
   const generated = new Date(snapshot.generatedAt);
   const latestFx = latest(fred.DEXKOUS);
   document.querySelector(".snapshot span").textContent = latestFx
-    ? "최신 환율 관측"
+    ? "연준 H.10 최신 관측"
     : "데이터 생성";
   document.querySelector("#snapshot-date").textContent = latestFx
     ? latestFx.label.replaceAll("-", ".")
