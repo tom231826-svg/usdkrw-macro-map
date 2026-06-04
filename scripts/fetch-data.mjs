@@ -85,6 +85,65 @@ const requestHeaders = {
   "User-Agent": "usdkrw-macro-map/0.1 (+local-prototype)",
 };
 
+const fetchTimeoutMs = Number(process.env.MARKET_DATA_FETCH_TIMEOUT_MS ?? 10000);
+const fetchMaxAttempts = Number(process.env.MARKET_DATA_FETCH_ATTEMPTS ?? 2);
+const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function describeFetchError(error) {
+  if (error?.name === "AbortError") {
+    return `timed out after ${fetchTimeoutMs}ms`;
+  }
+  return error?.message || String(error);
+}
+
+async function fetchWithRetry(url, label) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= fetchMaxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), fetchTimeoutMs);
+    timeout.unref?.();
+
+    try {
+      const response = await fetch(url, {
+        headers: requestHeaders,
+        signal: controller.signal,
+      });
+
+      if (
+        response.ok ||
+        !retryableStatuses.has(response.status) ||
+        attempt === fetchMaxAttempts
+      ) {
+        return response;
+      }
+
+      process.stderr.write(
+        `Warning: ${label} returned ${response.status}; retrying (${attempt}/${fetchMaxAttempts})...\n`,
+      );
+    } catch (error) {
+      lastError = error;
+      if (attempt === fetchMaxAttempts) {
+        throw new Error(`${label} request failed: ${describeFetchError(error)}`);
+      }
+
+      process.stderr.write(
+        `Warning: ${label} request failed: ${describeFetchError(error)}; retrying (${attempt}/${fetchMaxAttempts})...\n`,
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    await sleep(1000 * attempt);
+  }
+
+  throw new Error(`${label} request failed: ${describeFetchError(lastError)}`);
+}
+
 function parseKoreaLocalDateTime(text) {
   const match = text.match(/(\d{4})\.(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})/);
   if (!match) return null;
@@ -118,7 +177,7 @@ function parseFredCsv(csv, id) {
 
 async function fetchFredSeries(series) {
   const url = `https://fred.stlouisfed.org/graph/fredgraph.csv?id=${series.id}`;
-  const response = await fetch(url, { headers: requestHeaders });
+  const response = await fetchWithRetry(url, `FRED ${series.id}`);
   if (!response.ok) {
     throw new Error(`FRED ${series.id} failed: ${response.status}`);
   }
@@ -128,7 +187,7 @@ async function fetchFredSeries(series) {
 
 async function fetchWorldBankIndicator(indicator) {
   const url = `https://api.worldbank.org/v2/country/KOR/indicator/${indicator.id}?format=json&per_page=90`;
-  const response = await fetch(url, { headers: requestHeaders });
+  const response = await fetchWithRetry(url, `World Bank ${indicator.id}`);
   if (!response.ok) {
     throw new Error(`World Bank ${indicator.id} failed: ${response.status}`);
   }
@@ -145,7 +204,7 @@ async function fetchWorldBankIndicator(indicator) {
 async function fetchNaverUsdKrwSpot() {
   const url =
     "https://finance.naver.com/marketindex/exchangeDetail.naver?marketindexCd=FX_USDKRW";
-  const response = await fetch(url, { headers: requestHeaders });
+  const response = await fetchWithRetry(url, "Naver USD/KRW spot");
   if (!response.ok) {
     throw new Error(`Naver USD/KRW spot failed: ${response.status}`);
   }
@@ -189,6 +248,16 @@ async function readExistingSnapshot(filePath) {
   }
 }
 
+function hasRows(rows) {
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+function warnUsingCachedData(label, error, detail) {
+  process.stderr.write(
+    `Warning: ${label} fetch failed (${error.message}). Reusing existing snapshot ${detail}.\n`,
+  );
+}
+
 function comparableSnapshot(snapshot) {
   return JSON.stringify({
     fred: snapshot.fred,
@@ -199,12 +268,24 @@ function comparableSnapshot(snapshot) {
 }
 
 async function main() {
+  const snapshotPath = resolve(root, "data", "snapshot.js");
+  const existing = await readExistingSnapshot(snapshotPath);
   const fred = {};
   const metadata = {};
 
   for (const series of fredSeries) {
     process.stdout.write(`Fetching FRED ${series.id}...\n`);
-    fred[series.id] = await fetchFredSeries(series);
+    try {
+      fred[series.id] = await fetchFredSeries(series);
+    } catch (error) {
+      const cachedRows = existing?.fred?.[series.id];
+      if (!hasRows(cachedRows)) {
+        throw error;
+      }
+
+      warnUsingCachedData(`FRED ${series.id}`, error, `(${cachedRows.length} rows)`);
+      fred[series.id] = cachedRows;
+    }
     metadata[series.id] = {
       label: series.label,
       source: series.source,
@@ -216,7 +297,17 @@ async function main() {
   const worldBankMetadata = {};
   for (const indicator of worldBankIndicators) {
     process.stdout.write(`Fetching World Bank ${indicator.id}...\n`);
-    worldBank[indicator.key] = await fetchWorldBankIndicator(indicator);
+    try {
+      worldBank[indicator.key] = await fetchWorldBankIndicator(indicator);
+    } catch (error) {
+      const cachedRows = existing?.worldBank?.[indicator.key];
+      if (!hasRows(cachedRows)) {
+        throw error;
+      }
+
+      warnUsingCachedData(`World Bank ${indicator.id}`, error, `(${cachedRows.length} rows)`);
+      worldBank[indicator.key] = cachedRows;
+    }
     worldBankMetadata[indicator.key] = {
       label: indicator.label,
       source: "World Bank",
@@ -225,8 +316,20 @@ async function main() {
   }
 
   process.stdout.write("Fetching Naver USD/KRW spot...\n");
+  let usdkrwSpot;
+  try {
+    usdkrwSpot = await fetchNaverUsdKrwSpot();
+  } catch (error) {
+    const cachedSpot = existing?.market?.usdkrwSpot;
+    if (!Number.isFinite(cachedSpot?.value)) {
+      throw error;
+    }
+
+    warnUsingCachedData("Naver USD/KRW spot", error, `(${cachedSpot.date})`);
+    usdkrwSpot = cachedSpot;
+  }
   const market = {
-    usdkrwSpot: await fetchNaverUsdKrwSpot(),
+    usdkrwSpot,
   };
 
   const snapshot = {
@@ -251,8 +354,6 @@ async function main() {
     },
   };
 
-  const snapshotPath = resolve(root, "data", "snapshot.js");
-  const existing = await readExistingSnapshot(snapshotPath);
   if (existing && comparableSnapshot(existing) === comparableSnapshot(snapshot)) {
     process.stdout.write("No data changes. Keeping existing data/snapshot.js\n");
     return;
