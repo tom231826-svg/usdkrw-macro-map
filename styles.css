@@ -320,6 +320,45 @@ section {
   margin-top: 14px;
 }
 
+.model-check {
+  background: #fbfcfb;
+  border: 1px solid #e1e6e2;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 14px;
+}
+
+.model-metrics {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.model-metrics div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.model-metrics span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.model-metrics strong {
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.model-check p {
+  color: #59645f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .pressure-grid {
   display: grid;
   gap: 18px;
@@ -416,6 +455,14 @@ section {
 
 .down .force-fill {
   background: var(--green);
+}
+
+.force-meta {
+  color: #6a736e;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 8px;
 }
 
 .force p {
@@ -753,6 +800,10 @@ section {
   }
 
   .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .model-metrics {
     grid-template-columns: 1fr;
   }
 

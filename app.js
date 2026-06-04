@@ -17,6 +17,10 @@ const ranges = {
   all: Infinity,
 };
 
+const signalHorizonDays = 30;
+const signalSampleStep = 10;
+const signalMinMovePct = 0.25;
+
 const fmt = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 });
 const fmt1 = new Intl.NumberFormat("ko-KR", {
   minimumFractionDigits: 1,
@@ -112,6 +116,7 @@ function changePct(series, days, anchorDate = latest(series)?.date) {
 
 function changeAbs(series, days, anchorDate = latest(series)?.date) {
   const end = atOrBefore(series, anchorDate);
+  if (!end) return null;
   const start = atOrBefore(series, new Date(end.date.getTime() - days * DAY));
   if (!start || !end) return null;
   return end.value - start.value;
@@ -150,8 +155,220 @@ function signText(value, unit = "%") {
 }
 
 function latestWorldBank(key) {
+  return latestWorldBankAt(key);
+}
+
+function latestWorldBankAt(key, anchorDate = latest(worldBank[key] ?? [])?.date) {
   const series = worldBank[key] ?? [];
-  return latest(series);
+  return anchorDate ? atOrBefore(series, anchorDate) : latest(series);
+}
+
+function bpChange(series, days, anchorDate = latest(series)?.date) {
+  const value = changeAbs(series, days, anchorDate);
+  return Number.isFinite(value) ? value * 100 : null;
+}
+
+function spreadChangeAt(anchorDate = latest(fred.DGS10)?.date) {
+  const endUs = atOrBefore(fred.DGS10, anchorDate)?.value;
+  const endKr = atOrBefore(fred.IRLTLT01KRM156N, anchorDate)?.value;
+  const startDate = anchorDate ? new Date(anchorDate.getTime() - 365 * DAY) : null;
+  const startUs = startDate ? atOrBefore(fred.DGS10, startDate)?.value : null;
+  const startKr = startDate ? atOrBefore(fred.IRLTLT01KRM156N, startDate)?.value : null;
+  if (![endUs, endKr, startUs, startKr].every(Number.isFinite)) return null;
+  return ((endUs - endKr) - (startUs - startKr)) * 100;
+}
+
+function reserveChangeAt(anchorDate = latest(worldBank.reservesUsd ?? [])?.date) {
+  const series = worldBank.reservesUsd ?? [];
+  let endIndex = -1;
+  for (let index = series.length - 1; index >= 0; index -= 1) {
+    if (!anchorDate || series[index].date <= anchorDate) {
+      endIndex = index;
+      break;
+    }
+  }
+  if (endIndex <= 0) return null;
+  const latestReserve = series[endIndex];
+  const previousReserve = series[endIndex - 1];
+  if (!Number.isFinite(latestReserve.value) || !Number.isFinite(previousReserve.value)) {
+    return null;
+  }
+  return ((latestReserve.value - previousReserve.value) / previousReserve.value) * 100;
+}
+
+const forceSpecs = {
+  달러지수: {
+    weak: 0.6,
+    strong: 3,
+    directionWhenPositive: "up",
+    valueAt: (date) => changePct(fred.DTWEXBGS, 60, date),
+  },
+  "미국 2년물 금리": {
+    weak: 12,
+    strong: 65,
+    directionWhenPositive: "up",
+    valueAt: (date) => bpChange(fred.DGS2, 60, date),
+  },
+  "미국 실질금리": {
+    weak: 10,
+    strong: 55,
+    directionWhenPositive: "up",
+    valueAt: (date) => bpChange(fred.DFII10, 60, date),
+  },
+  "위험회피 심리": {
+    weak: 8,
+    strong: 45,
+    directionWhenPositive: "up",
+    valueAt: (date) => changePct(fred.VIXCLS, 20, date),
+  },
+  "위안화 방향": {
+    weak: 0.4,
+    strong: 2.2,
+    directionWhenPositive: "up",
+    valueAt: (date) => changePct(fred.DEXCHUS, 60, date),
+  },
+  "엔화 방향": {
+    weak: 1,
+    strong: 5,
+    directionWhenPositive: "up",
+    valueAt: (date) => changePct(fred.DEXJPUS, 60, date),
+  },
+  "유가 부담": {
+    weak: 4,
+    strong: 18,
+    directionWhenPositive: "up",
+    valueAt: (date) => changePct(fred.DCOILBRENTEU, 60, date),
+  },
+  "위험자산 선호": {
+    weak: 2.5,
+    strong: 10,
+    directionWhenPositive: "down",
+    valueAt: (date) => changePct(fred.SP500, 60, date),
+  },
+  "미-한 장기금리차": {
+    weak: 18,
+    strong: 85,
+    directionWhenPositive: "up",
+    valueAt: (date) => spreadChangeAt(date),
+  },
+  "경상수지 완충력": {
+    weak: 0.6,
+    strong: 3.2,
+    directionWhenPositive: "down",
+    valueAt: (date) => {
+      const value = latestWorldBankAt("currentAccountPctGdp", date)?.value;
+      return Number.isFinite(value) ? value - 2.5 : null;
+    },
+  },
+  "성장 체력": {
+    weak: 0.35,
+    strong: 1.4,
+    directionWhenPositive: "down",
+    valueAt: (date) => {
+      const value = latestWorldBankAt("gdpGrowth", date)?.value;
+      return Number.isFinite(value) ? value - 2.1 : null;
+    },
+  },
+  "외환보유 완충력": {
+    weak: 1.5,
+    strong: 8,
+    directionWhenPositive: "down",
+    valueAt: (date) => reserveChangeAt(date),
+  },
+};
+
+function directionSignFor(value, directionWhenPositive) {
+  if (!Number.isFinite(value) || value === 0) return 0;
+  const positiveSign = directionWhenPositive === "up" ? 1 : -1;
+  return value > 0 ? positiveSign : -positiveSign;
+}
+
+function actualMoveSign(start, end) {
+  if (!start || !end) return 0;
+  const movePct = ((end.value - start.value) / start.value) * 100;
+  if (movePct > signalMinMovePct) return 1;
+  if (movePct < -signalMinMovePct) return -1;
+  return 0;
+}
+
+function reliabilityWeight(hitRate, observations) {
+  if (!observations) return 0.72;
+  return clamp(0.75 + (hitRate - 0.5) * 1.8, 0.55, 1.15);
+}
+
+function calibrateSignalReliability(horizonDays = signalHorizonDays) {
+  const fx = usdKrw;
+  const reliability = {};
+  if (fx.length < 320) return reliability;
+
+  Object.entries(forceSpecs).forEach(([name, spec]) => {
+    let hits = 0;
+    let observations = 0;
+    let signedMove = 0;
+
+    for (let i = 260; i < fx.length; i += signalSampleStep) {
+      const point = fx[i];
+      const actualIndex = firstIndexAtOrAfterDate(
+        fx,
+        new Date(point.date.getTime() + horizonDays * DAY),
+        i + 1,
+      );
+      if (actualIndex < 0) break;
+
+      const signal = spec.valueAt(point.date);
+      if (!Number.isFinite(signal) || Math.abs(signal) < spec.weak) continue;
+
+      const predicted = directionSignFor(signal, spec.directionWhenPositive);
+      const actual = actualMoveSign(point, fx[actualIndex]);
+      if (!predicted || !actual) continue;
+
+      observations += 1;
+      if (predicted === actual) hits += 1;
+      signedMove += predicted * (((fx[actualIndex].value - point.value) / point.value) * 100);
+    }
+
+    const hitRate = observations ? hits / observations : 0;
+    reliability[name] = {
+      hitRate,
+      hits,
+      observations,
+      avgSignedMove: observations ? signedMove / observations : 0,
+      weight: reliabilityWeight(hitRate, observations),
+    };
+  });
+
+  return reliability;
+}
+
+function signalConfidence(forces) {
+  const tested = forces.filter((force) => force.reliability?.observations);
+  const totalStrength = tested.reduce((sum, force) => sum + force.strength, 0);
+  if (!totalStrength) return 0.45;
+  const weightedHit = tested.reduce(
+    (sum, force) => sum + force.strength * force.reliability.hitRate,
+    0,
+  ) / totalStrength;
+  return clamp(0.25 + (weightedHit - 0.45) * 3, 0.25, 1);
+}
+
+function signalDiagnostics(forces) {
+  const tested = forces.filter((force) => force.reliability?.observations);
+  const totalStrength = tested.reduce((sum, force) => sum + force.strength, 0);
+  const hitRate = totalStrength
+    ? tested.reduce((sum, force) => sum + force.strength * force.reliability.hitRate, 0) /
+      totalStrength
+    : 0;
+  const observations = tested.reduce((sum, force) => sum + force.reliability.observations, 0);
+  const leaders = tested
+    .slice()
+    .sort((a, b) => b.reliability.weight * b.strength - a.reliability.weight * a.strength)
+    .slice(0, 3);
+  return {
+    hitRate,
+    observations,
+    confidence: signalConfidence(forces),
+    leaders,
+  };
 }
 
 function classifyRegime(date) {
@@ -291,7 +508,7 @@ function renderLegend() {
     .join("");
 }
 
-function makeForce({ name, value, weak, strong, directionWhenPositive, reason }) {
+function makeForce({ name, value, weak, strong, directionWhenPositive, reason, reliability }) {
   if (!Number.isFinite(value)) return null;
   const direction =
     value >= 0
@@ -299,38 +516,33 @@ function makeForce({ name, value, weak, strong, directionWhenPositive, reason })
       : directionWhenPositive === "up"
         ? "down"
         : "up";
-  const strength = strengthFrom(value, weak, strong);
+  const baseStrength = strengthFrom(value, weak, strong);
+  const strength = clamp(baseStrength * (reliability?.weight ?? 1), 22, 96);
   return {
     name,
     direction,
     strength,
     tone: toneFromStrength(strength),
+    reliability,
     reason,
     raw: value,
   };
 }
 
-function buildForces() {
-  const dxy60 = changePct(fred.DTWEXBGS, 60);
-  const us2y60 = changeAbs(fred.DGS2, 60) * 100;
-  const realYield60 = changeAbs(fred.DFII10, 60) * 100;
-  const vix20 = changePct(fred.VIXCLS, 20);
-  const cnh60 = changePct(fred.DEXCHUS, 60);
-  const jpy60 = changePct(fred.DEXJPUS, 60);
-  const oil60 = changePct(fred.DCOILBRENTEU, 60);
-  const sp50060 = changePct(fred.SP500, 60);
-  const usKrSpread = (latest(fred.DGS10)?.value ?? 0) - (latest(fred.IRLTLT01KRM156N)?.value ?? 0);
-  const usKrSpread365 =
-    ((atOrBefore(fred.DGS10, new Date(latest(fred.DGS10).date.getTime() - 365 * DAY))?.value ?? 0) -
-      (atOrBefore(fred.IRLTLT01KRM156N, new Date(latest(fred.DGS10).date.getTime() - 365 * DAY))?.value ?? 0));
-  const spreadChange = (usKrSpread - usKrSpread365) * 100;
+function buildForces(signalReliability = {}) {
+  const dxy60 = forceSpecs.달러지수.valueAt();
+  const us2y60 = forceSpecs["미국 2년물 금리"].valueAt();
+  const realYield60 = forceSpecs["미국 실질금리"].valueAt();
+  const vix20 = forceSpecs["위험회피 심리"].valueAt();
+  const cnh60 = forceSpecs["위안화 방향"].valueAt();
+  const jpy60 = forceSpecs["엔화 방향"].valueAt();
+  const oil60 = forceSpecs["유가 부담"].valueAt();
+  const sp50060 = forceSpecs["위험자산 선호"].valueAt();
+  const spreadChange = forceSpecs["미-한 장기금리차"].valueAt();
 
   const currentAccount = latestWorldBank("currentAccountPctGdp")?.value;
   const gdpGrowth = latestWorldBank("gdpGrowth")?.value;
-  const reserveSeries = worldBank.reservesUsd ?? [];
-  const reserveLatest = latest(reserveSeries);
-  const reservePrev = reserveSeries[reserveSeries.length - 2];
-  const reserveChange = reserveLatest && reservePrev ? ((reserveLatest.value - reservePrev.value) / reservePrev.value) * 100 : null;
+  const reserveChange = forceSpecs["외환보유 완충력"].valueAt();
 
   const dxyReason =
     dxy60 >= 0
@@ -388,6 +600,7 @@ function buildForces() {
       weak: 0.6,
       strong: 3,
       directionWhenPositive: "up",
+      reliability: signalReliability.달러지수,
       reason: `최근 60일 변화 ${signText(dxy60)}. ${dxyReason}`,
     }),
     makeForce({
@@ -396,6 +609,7 @@ function buildForces() {
       weak: 12,
       strong: 65,
       directionWhenPositive: "up",
+      reliability: signalReliability["미국 2년물 금리"],
       reason: `최근 60일 변화 ${signText(us2y60, "bp")}. ${us2yReason}`,
     }),
     makeForce({
@@ -404,6 +618,7 @@ function buildForces() {
       weak: 10,
       strong: 55,
       directionWhenPositive: "up",
+      reliability: signalReliability["미국 실질금리"],
       reason: `10년 TIPS 기준 최근 60일 변화 ${signText(realYield60, "bp")}. ${realYieldReason}`,
     }),
     makeForce({
@@ -412,6 +627,7 @@ function buildForces() {
       weak: 8,
       strong: 45,
       directionWhenPositive: "up",
+      reliability: signalReliability["위험회피 심리"],
       reason: `VIX 최근 20일 변화 ${signText(vix20)}. ${vixReason}`,
     }),
     makeForce({
@@ -420,6 +636,7 @@ function buildForces() {
       weak: 0.4,
       strong: 2.2,
       directionWhenPositive: "up",
+      reliability: signalReliability["위안화 방향"],
       reason: `USD/CNY 최근 60일 변화 ${signText(cnh60)}. ${cnhReason}`,
     }),
     makeForce({
@@ -428,6 +645,7 @@ function buildForces() {
       weak: 1,
       strong: 5,
       directionWhenPositive: "up",
+      reliability: signalReliability["엔화 방향"],
       reason: `USD/JPY 최근 60일 변화 ${signText(jpy60)}. ${jpyReason}`,
     }),
     makeForce({
@@ -436,6 +654,7 @@ function buildForces() {
       weak: 4,
       strong: 18,
       directionWhenPositive: "up",
+      reliability: signalReliability["유가 부담"],
       reason: `브렌트유 최근 60일 변화 ${signText(oil60)}. ${oilReason}`,
     }),
     makeForce({
@@ -444,6 +663,7 @@ function buildForces() {
       weak: 2.5,
       strong: 10,
       directionWhenPositive: "down",
+      reliability: signalReliability["위험자산 선호"],
       reason: `S&P 500 최근 60일 변화 ${signText(sp50060)}. ${sp500Reason}`,
     }),
     makeForce({
@@ -452,6 +672,7 @@ function buildForces() {
       weak: 18,
       strong: 85,
       directionWhenPositive: "up",
+      reliability: signalReliability["미-한 장기금리차"],
       reason: `최근 1년 장기금리차 변화 ${signText(spreadChange, "bp")}. ${spreadReason}`,
     }),
     makeForce({
@@ -460,6 +681,7 @@ function buildForces() {
       weak: 0.6,
       strong: 3.2,
       directionWhenPositive: "down",
+      reliability: signalReliability["경상수지 완충력"],
       reason: `World Bank 최신 연간 경상수지 ${fmt1.format(currentAccount)}% of GDP. ${currentAccountReason}`,
     }),
     makeForce({
@@ -468,6 +690,7 @@ function buildForces() {
       weak: 0.35,
       strong: 1.4,
       directionWhenPositive: "down",
+      reliability: signalReliability["성장 체력"],
       reason: `World Bank 최신 연간 성장률 ${fmt1.format(gdpGrowth)}%. ${growthReason}`,
     }),
     makeForce({
@@ -476,6 +699,7 @@ function buildForces() {
       weak: 1.5,
       strong: 8,
       directionWhenPositive: "down",
+      reliability: signalReliability["외환보유 완충력"],
       reason: `World Bank 외환보유액 최근 연간 변화 ${signText(reserveChange)}. ${reserveReason}`,
     }),
   ].filter(Boolean);
@@ -498,6 +722,10 @@ function renderForces(forces) {
         <span class="force-tone">${force.tone}</span>
       </div>
       <div class="force-track"><span class="force-fill" style="--strength: ${force.strength.toFixed(0)}%"></span></div>
+      <div class="force-meta">
+        <span>30일 적중 ${force.reliability?.observations ? `${fmt1.format(force.reliability.hitRate * 100)}%` : "부족"}</span>
+        <span>${force.reliability?.observations ? `${force.reliability.observations}회` : "표본 없음"}</span>
+      </div>
       <p>${force.reason}</p>
     </article>
   `;
@@ -627,7 +855,8 @@ function buildForecast(up, down) {
   const upEnergy = forceEnergy(up);
   const downEnergy = forceEnergy(down);
   const skew = clamp((upEnergy - downEnergy) / Math.max(1, upEnergy + downEnergy), -1, 1);
-  const annualDrift = clamp(meanAnnual * 0.25 + skew * 0.06, -0.09, 0.09);
+  const confidence = signalConfidence([...up, ...down]);
+  const annualDrift = clamp(meanAnnual * 0.25 + skew * 0.06 * confidence, -0.09, 0.09);
   const horizons = [0, 30, 60, 90, 120, 150, 180];
   const calibration = calibrateForecastCone(fx, horizons);
   const future = horizons.map((days) => {
@@ -635,7 +864,7 @@ function buildForecast(up, down) {
     const tradingDays = (days / 365) * 252;
     const mid = currentPoint.value * Math.exp(annualDrift * calendarYears);
     const { lowerZ, upperZ } = calibration[days] ?? { lowerZ: -1.28, upperZ: 1.28 };
-    const spreadUnit = dailyVol * Math.sqrt(tradingDays);
+    const spreadUnit = dailyVol * Math.sqrt(tradingDays) * (1 + (1 - confidence) * 0.2);
     return {
       days,
       date: new Date(currentPoint.date.getTime() + days * DAY),
@@ -652,6 +881,7 @@ function buildForecast(up, down) {
     currentPoint,
     future,
     history: fx.filter((point) => point.date >= new Date(currentPoint.date.getTime() - 365 * DAY)),
+    signalConfidence: confidence,
     skew,
   };
 }
@@ -661,9 +891,11 @@ function renderForecast(up, down) {
   const svg = document.querySelector("#forecast-chart");
   const readout = document.querySelector("#forecast-readout");
   const note = document.querySelector("#forecast-note");
+  const modelCheck = document.querySelector("#model-check");
   if (!forecast || !svg || !readout || !note) return;
 
-  const { annualDrift, annualVol, calibration, currentPoint, future, history, skew } = forecast;
+  const { annualDrift, annualVol, calibration, currentPoint, future, history, signalConfidence, skew } =
+    forecast;
   const width = 920;
   const height = 330;
   const margin = { top: 28, right: 66, bottom: 38, left: 62 };
@@ -760,14 +992,31 @@ function renderForecast(up, down) {
   const driftLabel =
     annualDrift > 0.015 ? "상방 기울기" : annualDrift < -0.015 ? "하방 기울기" : "중립 기울기";
   const skewLabel = skew > 0.12 ? "환율 상승 쪽" : skew < -0.12 ? "환율 하락 쪽" : "양쪽 충돌";
+  const confidenceLabel =
+    signalConfidence > 0.72 ? "보통 이상" : signalConfidence < 0.45 ? "낮음" : "중간";
   const calibration180 = calibration[180];
   const coverageText = calibration180?.coverage
     ? `${fmt1.format(calibration180.coverage * 100)}%`
     : "약 80%";
   note.textContent =
     `최근 1년 실현 변동성은 연 ${fmt2.format(annualVol * 100)}%이고, 현재 압력은 ${skewLabel}입니다. ` +
-    `${driftLabel}를 반영하되, 과거 USD/KRW 롤링 백테스트의 10~90% 오차범위로 보정했습니다. ` +
+    `검증 신뢰도는 ${confidenceLabel}이라 ${driftLabel}를 그만큼만 반영하고, 과거 USD/KRW 롤링 백테스트의 10~90% 오차범위로 보정했습니다. ` +
     `6개월 구간의 과거 포함률은 ${coverageText}였고, 실제 최대·최소는 모릅니다.`;
+
+  if (modelCheck) {
+    const diagnostics = signalDiagnostics([...up, ...down]);
+    const leaderText = diagnostics.leaders
+      .map((force) => `${force.name} ${fmt1.format(force.reliability.hitRate * 100)}%`)
+      .join(" · ");
+    modelCheck.innerHTML = `
+      <div class="model-metrics">
+        <div><span>30일 검증 적중</span><strong>${diagnostics.observations ? `${fmt1.format(diagnostics.hitRate * 100)}%` : "-"}</strong></div>
+        <div><span>신호 표본</span><strong>${diagnostics.observations ? fmt.format(diagnostics.observations) : "-"}</strong></div>
+        <div><span>신뢰도</span><strong>${fmt1.format(diagnostics.confidence * 100)}%</strong></div>
+      </div>
+      <p>${leaderText ? `현재 강하게 반영되는 검증 신호: ${leaderText}` : "아직 검증 가능한 신호가 충분하지 않습니다."}</p>
+    `;
+  }
 }
 
 function renderSummary(up, down) {
@@ -994,7 +1243,8 @@ function init() {
   renderLegend();
   renderChart("3m");
 
-  const forces = buildForces();
+  const signalReliability = calibrateSignalReliability();
+  const forces = buildForces(signalReliability);
   const { up, down } = renderForces(forces);
   renderSummary(up, down);
   renderForecast(up, down);
